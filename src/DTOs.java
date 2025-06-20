@@ -34,6 +34,21 @@ public class StaffAssignmentDTO
 
 public class NewArtifactProjectDTO
 {
-    public ArtifactDTO Artifact { get; set; }
-    public ProjectDTO Project { get; set; }
+    public NewArtifactDTO Artifact { get; set; }
+    public NewProjectDTO Project { get; set; }
 }
+
+public class NewArtifactDTO
+{
+    public string Name { get; set; }
+    public DateTime OriginDate { get; set; }
+    public int InstitutionId { get; set; }
+}
+
+public class NewProjectDTO
+{
+    public string Objective { get; set; }
+    public DateTime StartDate { get; set; }
+    public DateTime? EndDate { get; set; }
+}
+
