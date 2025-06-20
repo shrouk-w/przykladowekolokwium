@@ -1,6 +1,6 @@
-using System.Data.SqlClient;
 using System.Data;
-using WebApplication1.Models; // Zamień na odpowiedni namespace z modelami
+using System.Data.SqlClient;
+using WebApplication1.Models;
 
 public class Repository
 {
@@ -13,10 +13,10 @@ public class Repository
 
     public async Task<ProjectDTO?> GetProjectByIdAsync(int projectId)
 {
-    using var connection = new SqlConnection(_connectionString);
+    await using var connection = new SqlConnection(_connectionString);
     await connection.OpenAsync();
 
-    var command = new SqlCommand(@"
+    var projectQuery = @"
     SELECT
             [p].[ProjectId], [p].[Objective], [p].[StartDate], [p].[EndDate],
                 [a].[ArtifactId], [a].[Name] AS [ArtifactName], [a].[OriginDate], [a].[InstitutionId],
@@ -24,43 +24,50 @@ public class Repository
     FROM [Projects] AS [p]
     JOIN [Artifacts] AS [a] ON [a].[ArtifactId] = [p].[ArtifactId]
     JOIN [Institutions] AS [i] ON [i].[InstitutionId] = [a].[InstitutionId]
-    WHERE [p].[ProjectId] = @projectId", connection);
-    command.Parameters.AddWithValue("@projectId", projectId);
+    WHERE [p].[ProjectId] = @projectId";
 
-    using var reader = await command.ExecuteReaderAsync();
-    if (!reader.Read()) return null;
+    await using var command = new SqlCommand(projectQuery, connection);
+    command.Parameters.Add("@projectId", SqlDbType.Int).Value = projectId;
+
+    await using var reader = await command.ExecuteReaderAsync();
+    if (!await reader.ReadAsync())
+    return null;
 
     var project = new ProjectDTO
     {
-        ProjectId = reader.GetInt32(0),
-                Objective = reader.GetString(1),
-                StartDate = reader.GetDateTime(2),
-                EndDate = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+        ProjectId = reader.GetInt32(reader.GetOrdinal("ProjectId")),
+                Objective = reader.GetString(reader.GetOrdinal("Objective")),
+                StartDate = reader.GetDateTime(reader.GetOrdinal("StartDate")),
+                EndDate = reader.IsDBNull(reader.GetOrdinal("EndDate")) ? null : reader.GetDateTime(reader.GetOrdinal("EndDate")),
                 Artifact = new ArtifactDTO
         {
-            Name = reader.GetString(5),
-                    OriginDate = reader.GetDateTime(6),
+            ArtifactId = reader.GetInt32(reader.GetOrdinal("ArtifactId")),
+                    Name = reader.GetString(reader.GetOrdinal("ArtifactName")),
+                    OriginDate = reader.GetDateTime(reader.GetOrdinal("OriginDate")),
+                    InstitutionId = reader.GetInt32(reader.GetOrdinal("InstitutionId")),
                     Institution = new InstitutionDTO
             {
-                InstitutionId = reader.GetInt32(7),
-                        Name = reader.GetString(8),
-                        FoundedYear = reader.GetInt32(9)
+                InstitutionId = reader.GetInt32(reader.GetOrdinal("InstitutionId")),
+                        Name = reader.GetString(reader.GetOrdinal("InstitutionName")),
+                        FoundedYear = reader.GetInt32(reader.GetOrdinal("FoundedYear"))
             }
         },
         StaffAssignments = new List<StaffAssignmentDTO>()
     };
 
-    // Staff assignments
-    reader.Close();
-    var staffCmd = new SqlCommand(@"
+    await reader.CloseAsync();
+
+    var staffQuery = @"
     SELECT
             [s].[FirstName], [s].[LastName], [s].[HireDate], [sa].[Role]
     FROM [Staff_Assignments] AS [sa]
     JOIN [Staff] AS [s] ON [s].[StaffId] = [sa].[StaffId]
-    WHERE [sa].[ProjectId] = @projectId", connection);
-    staffCmd.Parameters.AddWithValue("@projectId", projectId);
+    WHERE [sa].[ProjectId] = @projectId";
 
-    using var staffReader = await staffCmd.ExecuteReaderAsync();
+    await using var staffCmd = new SqlCommand(staffQuery, connection);
+    staffCmd.Parameters.Add("@projectId", SqlDbType.Int).Value = projectId;
+
+    await using var staffReader = await staffCmd.ExecuteReaderAsync();
     while (await staffReader.ReadAsync())
     {
         project.StaffAssignments.Add(new StaffAssignmentDTO
@@ -77,32 +84,49 @@ public class Repository
 
     public async Task AddArtifactAndProjectAsync(NewArtifactProjectDTO request)
 {
-    using var connection = new SqlConnection(_connectionString);
+    if (request == null || request.Artifact == null || request.Project == null)
+        throw new ArgumentNullException(nameof(request));
+
+    await using var connection = new SqlConnection(_connectionString);
     await connection.OpenAsync();
-    using var transaction = connection.BeginTransaction();
+    await using var transaction = await connection.BeginTransactionAsync();
 
     try
     {
+        int artifactId;
+        int projectId;
+
         // Insert artifact
-        var insertArtifactCmd = new SqlCommand(@"
-        INSERT INTO [Artifacts] ([ArtifactId], [Name], [OriginDate], [InstitutionId])
-        VALUES (@id, @name, @originDate, @institutionId)", connection, transaction);
-        insertArtifactCmd.Parameters.AddWithValue("@id", request.Artifact.ArtifactId);
-        insertArtifactCmd.Parameters.AddWithValue("@name", request.Artifact.Name);
-        insertArtifactCmd.Parameters.AddWithValue("@originDate", request.Artifact.OriginDate);
-        insertArtifactCmd.Parameters.AddWithValue("@institutionId", request.Artifact.InstitutionId);
-        await insertArtifactCmd.ExecuteNonQueryAsync();
+        var insertArtifactSql = @"
+        INSERT INTO [Artifacts] ([Name], [OriginDate], [InstitutionId])
+        OUTPUT INSERTED.[ArtifactId]
+        VALUES (@name, @originDate, @institutionId)";
+
+        await using (var insertArtifactCmd = new SqlCommand(insertArtifactSql, connection, (SqlTransaction)transaction))
+        {
+            insertArtifactCmd.Parameters.Add("@name", SqlDbType.NVarChar, 100).Value = request.Artifact.Name;
+            insertArtifactCmd.Parameters.Add("@originDate", SqlDbType.Date).Value = request.Artifact.OriginDate;
+            insertArtifactCmd.Parameters.Add("@institutionId", SqlDbType.Int).Value = request.Artifact.InstitutionId;
+
+            artifactId = (int)await insertArtifactCmd.ExecuteScalarAsync();
+        }
 
         // Insert project
-        var insertProjectCmd = new SqlCommand(@"
-        INSERT INTO [Projects] ([ProjectId], [Objective], [StartDate], [EndDate], [ArtifactId])
-        VALUES (@id, @objective, @startDate, @endDate, @artifactId)", connection, transaction);
-        insertProjectCmd.Parameters.AddWithValue("@id", request.Project.ProjectId);
-        insertProjectCmd.Parameters.AddWithValue("@objective", request.Project.Objective);
-        insertProjectCmd.Parameters.AddWithValue("@startDate", request.Project.StartDate);
-        insertProjectCmd.Parameters.AddWithValue("@endDate", (object?)request.Project.EndDate ?? DBNull.Value);
-        insertProjectCmd.Parameters.AddWithValue("@artifactId", request.Artifact.ArtifactId);
-        await insertProjectCmd.ExecuteNonQueryAsync();
+        var insertProjectSql = @"
+        INSERT INTO [Projects] ([Objective], [StartDate], [EndDate], [ArtifactId])
+        OUTPUT INSERTED.[ProjectId]
+        VALUES (@objective, @startDate, @endDate, @artifactId)";
+
+        await using (var insertProjectCmd = new SqlCommand(insertProjectSql, connection, (SqlTransaction)transaction))
+        {
+            insertProjectCmd.Parameters.Add("@objective", SqlDbType.NVarChar, 500).Value = request.Project.Objective;
+            insertProjectCmd.Parameters.Add("@startDate", SqlDbType.Date).Value = request.Project.StartDate;
+            insertProjectCmd.Parameters.Add("@endDate", SqlDbType.Date).Value =
+                    (object?)request.Project.EndDate ?? DBNull.Value;
+            insertProjectCmd.Parameters.Add("@artifactId", SqlDbType.Int).Value = artifactId;
+
+            projectId = (int)await insertProjectCmd.ExecuteScalarAsync();
+        }
 
         await transaction.CommitAsync();
     }
@@ -113,4 +137,3 @@ public class Repository
     }
 }
 }
-
